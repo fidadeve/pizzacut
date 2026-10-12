@@ -1,0 +1,23 @@
+{
+  "name": "pizzacut",
+  "private": true,
+  "version": "1.0.0",
+  "description": "PizzaCut — premium pizza ordering app",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "build": "npm run build -w client",
+    "start": "npm run start -w server",
+    "typecheck": "npm run typecheck -w client",
+    "test": "npm run test -w server"
+  },
+  "dependencies": {
+    "playwright": "^1.64.0",
+    "sharp": "^0.35.5"
+  }
+}

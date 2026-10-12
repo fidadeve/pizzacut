@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+server/data/*.db
+server/data/*.db-*
+client/public/images/uploads/
+.env
+.tools/
+libs/
