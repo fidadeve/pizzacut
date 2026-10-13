@@ -1,10 +1,10 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
 import { get, run } from '../db.js';
 import { computeCart, validatePromo, loadProduct, loadProductOptions, priceItem } from '../pricing.js';
-import { wrap, uid, now, HttpError } from '../util.js';
+import { uid, now, HttpError, readJson } from '../util.js';
 
-export const cartRouter = Router();
+export const cart = new Hono();
 
 const itemSchema = z.object({
   productId: z.string().min(1, 'Missing product.'),
@@ -15,25 +15,24 @@ const itemSchema = z.object({
   qty: z.number().int().min(1).max(20).optional(),
 });
 
-cartRouter.get('/', wrap(async (req, res) => {
-  res.json({ cart: computeCart(req.cartId) });
-}));
+cart.get('/', async (c) => c.json({ cart: await computeCart(c.get('ctx').cartId) }));
 
-cartRouter.post('/items', wrap(async (req, res) => {
-  const body = itemSchema.parse(req.body);
-  const product = loadProduct(body.productId);
+cart.post('/items', async (c) => {
+  const ctx = c.get('ctx');
+  const body = itemSchema.parse(await readJson(c));
+  const product = await loadProduct(body.productId);
   if (!product || !product.available) throw new HttpError(404, 'This item is currently unavailable.');
-  const options = loadProductOptions(product.id);
-  const priced = priceItem({ product, options, selection: body });
-  run(`INSERT INTO cart_items (id, cart_id, product_id, size, crust, toppings, extra_cheese, qty, created_at)
+  const options = await loadProductOptions(product.id);
+  const priced = await priceItem({ product, options, selection: body });
+  await run(`INSERT INTO cart_items (id, cart_id, product_id, size, crust, toppings, extra_cheese, qty, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    uid(), req.cartId, product.id,
+    uid(), ctx.cartId, product.id,
     priced.detail.sizeKey, priced.detail.crust,
     JSON.stringify(priced.detail.toppings.map(t => t.id)),
     priced.detail.extraCheese ? 1 : 0, priced.qty, now());
-  run('UPDATE carts SET updated_at = ? WHERE id = ?', now(), req.cartId);
-  res.status(201).json({ cart: computeCart(req.cartId) });
-}));
+  await run('UPDATE carts SET updated_at = ? WHERE id = ?', now(), ctx.cartId);
+  return c.json({ cart: await computeCart(ctx.cartId) }, 201);
+});
 
 const patchSchema = z.object({
   qty: z.number().int().min(1).max(20).optional(),
@@ -43,12 +42,14 @@ const patchSchema = z.object({
   extraCheese: z.boolean().optional(),
 });
 
-cartRouter.patch('/items/:id', wrap(async (req, res) => {
-  const row = get('SELECT * FROM cart_items WHERE id = ? AND cart_id = ?', req.params.id, req.cartId);
+cart.patch('/items/:id', async (c) => {
+  const ctx = c.get('ctx');
+  const itemId = c.req.param('id');
+  const row = await get('SELECT * FROM cart_items WHERE id = ? AND cart_id = ?', itemId, ctx.cartId);
   if (!row) throw new HttpError(404, 'That cart item no longer exists.');
-  const body = patchSchema.parse(req.body);
-  const product = loadProduct(row.product_id);
-  const options = loadProductOptions(row.product_id);
+  const body = patchSchema.parse(await readJson(c));
+  const product = await loadProduct(row.product_id);
+  const options = await loadProductOptions(row.product_id);
   const selection = {
     size: body.size !== undefined ? body.size : row.size,
     crust: body.crust !== undefined ? body.crust : row.crust,
@@ -56,35 +57,40 @@ cartRouter.patch('/items/:id', wrap(async (req, res) => {
     extraCheese: body.extraCheese ?? !!row.extra_cheese,
     qty: body.qty ?? row.qty,
   };
-  const priced = priceItem({ product, options, selection });
-  run(`UPDATE cart_items SET size = ?, crust = ?, toppings = ?, extra_cheese = ?, qty = ? WHERE id = ?`,
+  const priced = await priceItem({ product, options, selection });
+  await run(`UPDATE cart_items SET size = ?, crust = ?, toppings = ?, extra_cheese = ?, qty = ? WHERE id = ?`,
     priced.detail.sizeKey, priced.detail.crust,
     JSON.stringify(priced.detail.toppings.map(t => t.id)),
     priced.detail.extraCheese ? 1 : 0, priced.qty, row.id);
-  run('UPDATE carts SET updated_at = ? WHERE id = ?', now(), req.cartId);
-  res.json({ cart: computeCart(req.cartId) });
-}));
+  await run('UPDATE carts SET updated_at = ? WHERE id = ?', now(), ctx.cartId);
+  return c.json({ cart: await computeCart(ctx.cartId) });
+});
 
-cartRouter.delete('/items/:id', wrap(async (req, res) => {
-  run('DELETE FROM cart_items WHERE id = ? AND cart_id = ?', req.params.id, req.cartId);
-  res.json({ cart: computeCart(req.cartId) });
-}));
+cart.delete('/items/:id', async (c) => {
+  const ctx = c.get('ctx');
+  await run('DELETE FROM cart_items WHERE id = ? AND cart_id = ?', c.req.param('id'), ctx.cartId);
+  return c.json({ cart: await computeCart(ctx.cartId) });
+});
 
-cartRouter.post('/clear', wrap(async (req, res) => {
-  run('DELETE FROM cart_items WHERE cart_id = ?', req.cartId);
-  run('UPDATE carts SET promo_code = NULL WHERE id = ?', req.cartId);
-  res.json({ cart: computeCart(req.cartId) });
-}));
+cart.post('/clear', async (c) => {
+  const ctx = c.get('ctx');
+  await run('DELETE FROM cart_items WHERE cart_id = ?', ctx.cartId);
+  await run('UPDATE carts SET promo_code = NULL WHERE id = ?', ctx.cartId);
+  return c.json({ cart: await computeCart(ctx.cartId) });
+});
 
-cartRouter.post('/promo', wrap(async (req, res) => {
-  const code = String(req.body?.code ?? '');
-  const cart = computeCart(req.cartId);
-  const { promo } = validatePromo(code, cart.subtotalCents);
-  run('UPDATE carts SET promo_code = ? WHERE id = ?', promo.code, req.cartId);
-  res.json({ cart: computeCart(req.cartId) });
-}));
+cart.post('/promo', async (c) => {
+  const ctx = c.get('ctx');
+  const body = await readJson(c).catch(() => ({}));
+  const code = String(body?.code ?? '');
+  const cartState = await computeCart(ctx.cartId);
+  const { promo } = await validatePromo(code, cartState.subtotalCents);
+  await run('UPDATE carts SET promo_code = ? WHERE id = ?', promo.code, ctx.cartId);
+  return c.json({ cart: await computeCart(ctx.cartId) });
+});
 
-cartRouter.delete('/promo', wrap(async (req, res) => {
-  run('UPDATE carts SET promo_code = NULL WHERE id = ?', req.cartId);
-  res.json({ cart: computeCart(req.cartId) });
-}));
+cart.delete('/promo', async (c) => {
+  const ctx = c.get('ctx');
+  await run('UPDATE carts SET promo_code = NULL WHERE id = ?', ctx.cartId);
+  return c.json({ cart: await computeCart(ctx.cartId) });
+});

@@ -1,4 +1,4 @@
-import { db, get, run, all } from './db.js';
+import { get, run } from './db.js';
 import { hashPassword } from './auth.js';
 import { updateSettings } from './settings.js';
 import { uid, now } from './util.js';
@@ -93,62 +93,55 @@ const PROMOS = [
   { code: 'FLAT5', desc: '$5 off orders over $30', type: 'flat', value: 500, min: 3000, max: null },
 ];
 
-export function seed() {
-  if (get('SELECT id FROM products LIMIT 1')) return { seeded: false };
+export async function seed() {
+  if (await get('SELECT id FROM products LIMIT 1')) return { seeded: false };
 
-  const insertCat = (c, i) => {
+  const catIds = {};
+  for (const [i, c] of CATS.entries()) {
     const id = `cat-${c.slug}`;
-    run('INSERT INTO categories (id, slug, name, image, sort_order, active) VALUES (?, ?, ?, ?, ?, 1)',
+    await run('INSERT INTO categories (id, slug, name, image, sort_order, active) VALUES (?, ?, ?, ?, ?, 1)',
       id, c.slug, c.name, c.image, i);
-    return id;
-  };
-  const catIds = Object.fromEntries(CATS.map((c, i) => [c.slug, insertCat(c, i)]));
+    catIds[c.slug] = id;
+  }
 
   for (const t of TOPPINGS) {
-    run('INSERT INTO toppings (id, name, price_cents, is_veg, available) VALUES (?, ?, ?, ?, 1)',
+    await run('INSERT INTO toppings (id, name, price_cents, is_veg, available) VALUES (?, ?, ?, ?, 1)',
       t.id, t.name, t.price, t.veg);
   }
 
-  PRODUCTS.forEach((p, i) => {
+  for (const [i, p] of PRODUCTS.entries()) {
     const id = `prd-${p.slug}`;
-    run(`INSERT INTO products (id, slug, name, description, category_id, price_cents, image, is_veg, spice_level, badge, discount_pct, available, is_combo, sort_order, created_at)
+    await run(`INSERT INTO products (id, slug, name, description, category_id, price_cents, image, is_veg, spice_level, badge, discount_pct, available, is_combo, sort_order, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       id, p.slug, p.name, p.desc, catIds[p.cat], p.price, p.image, p.veg, p.spice,
       p.badge ?? null, p.discount ?? 0, p.combo ?? 0, i, now());
     if (PIZZA_CATS.has(p.cat)) {
       for (const s of SIZES) {
-        run('INSERT INTO product_sizes (id, product_id, size, name, delta_cents, is_default) VALUES (?, ?, ?, ?, ?, ?)',
+        await run('INSERT INTO product_sizes (id, product_id, size, name, delta_cents, is_default) VALUES (?, ?, ?, ?, ?, ?)',
           uid(), id, s.size, s.name, s.delta, s.def);
       }
-      for (const c of CRUSTS) {
-        run('INSERT INTO product_crusts (id, product_id, name, delta_cents, is_default) VALUES (?, ?, ?, ?, ?)',
-          uid(), id, c.name, c.delta, c.def);
+      for (const cr of CRUSTS) {
+        await run('INSERT INTO product_crusts (id, product_id, name, delta_cents, is_default) VALUES (?, ?, ?, ?, ?)',
+          uid(), id, cr.name, cr.delta, cr.def);
       }
       const tops = p.toppings ?? ALL_TOPPING_IDS;
       for (const tid of tops) {
-        run('INSERT INTO product_toppings (product_id, topping_id) VALUES (?, ?)', id, tid);
+        await run('INSERT INTO product_toppings (product_id, topping_id) VALUES (?, ?)', id, tid);
       }
     }
-  });
+  }
 
   for (const pr of PROMOS) {
-    run(`INSERT INTO promos (id, code, description, type, value, min_order_cents, max_discount_cents, active, expires_at)
+    await run(`INSERT INTO promos (id, code, description, type, value, min_order_cents, max_discount_cents, active, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL)`,
       uid(), pr.code, pr.desc, pr.type, pr.value, pr.min, pr.max);
   }
 
-  if (!get('SELECT id FROM users WHERE role = ?', 'admin')) {
-    run('INSERT INTO users (id, email, password_hash, name, phone, role, addresses, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      uid(), 'admin@pizzacut.com', hashPassword('admin123'), 'PizzaCut Staff', '+1 (555) 010-7788', 'admin', '[]', now());
+  if (!await get('SELECT id FROM users WHERE role = ?', 'admin')) {
+    await run('INSERT INTO users (id, email, password_hash, name, phone, role, addresses, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      uid(), 'admin@pizzacut.com', await hashPassword('admin123'), 'PizzaCut Staff', '+1 (555) 010-7788', 'admin', '[]', now());
   }
 
-  updateSettings({});
+  await updateSettings({});
   return { seeded: true, products: PRODUCTS.length, categories: CATS.length, promos: PROMOS.length };
-}
-
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop());
-if (isMain) {
-  const res = seed();
-  console.log(res.seeded ? 'Seeded database.' : 'Database already seeded.', res);
-  console.log('Admin login: admin@pizzacut.com / admin123');
 }

@@ -1,4 +1,4 @@
-import { get, run } from './db.js';
+import { all, get, run } from './db.js';
 
 export function trackingStages(fulfilment) {
   const pickup = fulfilment === 'pickup';
@@ -14,7 +14,7 @@ export function trackingStages(fulfilment) {
 // Seconds the order waits in each status before moving on (demo kitchen auto-advance).
 const WAITS = [30, 60, 90, 120];
 
-export function syncStatus(order, settings) {
+export async function syncStatus(order, settings) {
   if (order.status === 'delivered' || order.status === 'cancelled') return order;
   if (!settings.auto_advance) return order;
   const seq = order.fulfilment === 'pickup'
@@ -26,7 +26,7 @@ export function syncStatus(order, settings) {
   if (waitSec == null) return order;
   if (Date.now() - order.status_updated_at < waitSec * 1000) return order;
   const ts = Date.now();
-  run('UPDATE orders SET status = ?, status_updated_at = ?, updated_at = ? WHERE id = ?',
+  await run('UPDATE orders SET status = ?, status_updated_at = ?, updated_at = ? WHERE id = ?',
     seq[idx + 1], ts, ts, order.id);
   return get('SELECT * FROM orders WHERE id = ?', order.id);
 }

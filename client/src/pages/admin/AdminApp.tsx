@@ -64,7 +64,8 @@ function AdminLogin() {
         </button>
         <div className="mt-4 flex justify-between text-[12.5px] font-bold text-muted">
           <Link to="/" className="hover:text-brand">← Back to store</Link>
-          <span>Demo: admin@pizzacut.com / admin123</span>
+          {/* Never reveal staff credentials in a production build. */}
+          {import.meta.env.DEV && <span>Demo: admin@pizzacut.com / admin123</span>}
         </div>
       </form>
     </div>

@@ -1,80 +1,115 @@
-import crypto from 'node:crypto';
-import { db, get, run } from './db.js';
-import { HttpError, now, setCookie } from './util.js';
+import { getCookie, setCookie } from 'hono/cookie';
+import { get, run } from './db.js';
+import { HttpError, now, randomHex } from './util.js';
 
-const SESSION_TTL = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_S = SESSION_TTL_MS / 1000;
 export const SESSION_COOKIE = 'pc_sid';
 export const CART_COOKIE = 'pc_cart';
 
-export function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${hash}`;
+// PBKDF2-SHA256 via Web Crypto — identical on Node and Cloudflare Workers.
+// workerd caps PBKDF2 at 100k iterations; 50k keeps the CPU cost comfortably
+// inside the per-request budget while remaining a reasonable work factor.
+const PBKDF2_ITERATIONS = 50_000;
+
+async function pbkdf2(password, saltHex, iterations) {
+  const enc = new TextEncoder();
+  const salt = Uint8Array.from(saltHex.match(/.{2}/g).map(h => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+    key,
+    256,
+  );
+  return Array.from(new Uint8Array(bits), b => b.toString(16).padStart(2, '0')).join('');
 }
 
-export function verifyPassword(password, stored) {
-  const [salt, hash] = String(stored || '').split(':');
-  if (!salt || !hash) return false;
-  const candidate = crypto.scryptSync(password, salt, 64);
-  const expected = Buffer.from(hash, 'hex');
-  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+export async function hashPassword(password) {
+  const salt = randomHex(16);
+  const hash = await pbkdf2(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${salt}$${hash}`;
 }
 
-export function createSession(userId) {
-  const token = crypto.randomBytes(32).toString('hex');
-  run('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
-    token, userId ?? null, now(), now() + SESSION_TTL);
+export async function verifyPassword(password, stored) {
+  const [v, iterStr, salt, hash] = String(stored || '').split('$');
+  if (v !== 'pbkdf2' || !iterStr || !salt || !hash) return false;
+  const candidate = await pbkdf2(password, salt, Number(iterStr) || PBKDF2_ITERATIONS);
+  if (candidate.length !== hash.length) return false;
+  let diff = 0;
+  for (let i = 0; i < candidate.length; i++) diff |= candidate.charCodeAt(i) ^ hash.charCodeAt(i);
+  return diff === 0;
+}
+
+export async function createSession(userId) {
+  const token = randomHex(32);
+  await run('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+    token, userId ?? null, now(), now() + SESSION_TTL_MS);
   return token;
 }
 
-export function destroySession(token) {
-  if (token) run('DELETE FROM sessions WHERE token = ?', token);
+export async function destroySession(token) {
+  if (token) await run('DELETE FROM sessions WHERE token = ?', token);
 }
 
-/** Attaches req.user and guarantees a cart (req.cartId) for every request. */
-export function attachContext(req, res, next) {
-  const sid = req.cookies?.[SESSION_COOKIE];
+export const sessionCookieOptions = { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: SESSION_TTL_S };
+
+/**
+ * Hono middleware: attaches `ctx` (user / sessionToken / cartId) to the
+ * context and guarantees a session cookie and a cart cookie on every API request.
+ */
+export async function attachContext(c, next) {
+  const ctx = {};
+  c.set('ctx', ctx);
+
+  const sid = getCookie(c, SESSION_COOKIE);
   if (sid) {
-    const session = get('SELECT * FROM sessions WHERE token = ?', sid);
+    const session = await get('SELECT * FROM sessions WHERE token = ?', sid);
     if (session && session.expires_at > now()) {
-      req.sessionToken = sid;
-      req.user = session.user_id
-        ? get('SELECT id, email, name, phone, role, addresses, created_at FROM users WHERE id = ?', session.user_id) || null
+      ctx.sessionToken = sid;
+      ctx.user = session.user_id
+        ? await get('SELECT id, email, name, phone, role, addresses, created_at FROM users WHERE id = ?', session.user_id) || null
         : null;
     } else if (session) {
-      destroySession(sid);
+      await destroySession(sid);
     }
   }
-  if (!req.sessionToken) {
-    req.sessionToken = createSession(null);
-    setCookie(res, SESSION_COOKIE, req.sessionToken);
+  if (!ctx.sessionToken) {
+    ctx.sessionToken = await createSession(null);
+    setCookie(c, SESSION_COOKIE, ctx.sessionToken, sessionCookieOptions);
   }
-  let cartId = req.cookies?.[CART_COOKIE];
-  const cart = cartId ? get('SELECT id FROM carts WHERE id = ?', cartId) : null;
+
+  let cartId = getCookie(c, CART_COOKIE);
+  const cart = cartId ? await get('SELECT id FROM carts WHERE id = ?', cartId) : null;
   if (!cart) {
     cartId = crypto.randomUUID();
-    run('INSERT INTO carts (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)',
-      cartId, req.user?.id ?? null, now(), now());
-    setCookie(res, CART_COOKIE, cartId);
+    await run('INSERT INTO carts (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)',
+      cartId, ctx.user?.id ?? null, now(), now());
+    setCookie(c, CART_COOKIE, cartId, sessionCookieOptions);
   }
-  req.cartId = cartId;
-  next();
+  ctx.cartId = cartId;
+
+  await next();
 }
 
 /** Claim guest carts/orders into the account after login. */
-export function claimSessionData(userId, sessionToken) {
-  if (!sessionToken) return;
-  run('UPDATE carts SET user_id = ? WHERE id IS NOT NULL AND user_id IS NULL AND id IN (SELECT id FROM carts)', userId);
-  run('UPDATE orders SET user_id = ? WHERE session_token = ? AND user_id IS NULL', userId, sessionToken);
+export async function claimSessionData(userId, sessionToken, cartId) {
+  if (cartId) {
+    await run('UPDATE carts SET user_id = ? WHERE id = ? AND user_id IS NULL', userId, cartId);
+  }
+  if (sessionToken) {
+    await run('UPDATE orders SET user_id = ? WHERE session_token = ? AND user_id IS NULL', userId, sessionToken);
+  }
 }
 
-export function requireAuth(req, res, next) {
-  if (!req.user) return next(new HttpError(401, 'Please sign in to continue.'));
-  next();
+export async function requireAuth(c, next) {
+  const ctx = c.get('ctx');
+  if (!ctx?.user) throw new HttpError(401, 'Please sign in to continue.');
+  await next();
 }
 
-export function requireAdmin(req, res, next) {
-  if (!req.user) return next(new HttpError(401, 'Please sign in to continue.'));
-  if (req.user.role !== 'admin') return next(new HttpError(403, 'Staff access required.'));
-  next();
+export async function requireAdmin(c, next) {
+  const ctx = c.get('ctx');
+  if (!ctx?.user) throw new HttpError(401, 'Please sign in to continue.');
+  if (ctx.user.role !== 'admin') throw new HttpError(403, 'Staff access required.');
+  await next();
 }

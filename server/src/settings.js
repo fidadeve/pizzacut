@@ -22,50 +22,55 @@ export const DEFAULT_SETTINGS = {
   pay_wallet: 0,
 };
 
+// Short TTL so admin edits propagate across Worker isolates.
+const TTL_MS = 15_000;
 let cache = null;
+let cachedAt = 0;
 
-export function getSettings() {
-  if (cache) return cache;
+export async function getSettings() {
+  if (cache && Date.now() - cachedAt < TTL_MS) return cache;
   const out = { ...DEFAULT_SETTINGS };
-  for (const row of all('SELECT key, value FROM settings')) {
+  for (const row of await all('SELECT key, value FROM settings')) {
     try { out[row.key] = JSON.parse(row.value); } catch { out[row.key] = row.value; }
   }
   cache = out;
-  return out;
+  cachedAt = Date.now();
+  return cache;
 }
 
-export function invalidateSettings() { cache = null; }
+export function invalidateSettings() { cache = null; cachedAt = 0; }
 
-export function updateSettings(patch) {
+export async function updateSettings(patch) {
   for (const [key, value] of Object.entries(patch)) {
-    run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    await run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
       key, JSON.stringify(value));
   }
   invalidateSettings();
   return getSettings();
 }
 
-export function publicSettings(s = getSettings()) {
+export async function publicSettings(s) {
+  const st = s ?? await getSettings();
   return {
-    storeName: s.store_name,
-    tagline: s.tagline,
-    phone: s.phone,
-    email: s.email,
-    address: s.address,
-    hours: s.hours,
-    currencySymbol: s.currency_symbol,
-    currencyCode: s.currency_code,
-    deliveryFeeCents: s.delivery_fee_cents,
-    freeDeliveryMinCents: s.free_delivery_min_cents,
-    taxPct: s.tax_pct,
-    extraCheeseCents: s.extra_cheese_cents,
-    etaDeliveryMinutes: s.eta_delivery_minutes,
-    etaPickupMinutes: s.eta_pickup_minutes,
+    storeName: st.store_name,
+    tagline: st.tagline,
+    phone: st.phone,
+    email: st.email,
+    address: st.address,
+    hours: st.hours,
+    currencySymbol: st.currency_symbol,
+    currencyCode: st.currency_code,
+    deliveryFeeCents: st.delivery_fee_cents,
+    freeDeliveryMinCents: st.free_delivery_min_cents,
+    taxPct: st.tax_pct,
+    extraCheeseCents: st.extra_cheese_cents,
+    etaDeliveryMinutes: st.eta_delivery_minutes,
+    etaPickupMinutes: st.eta_pickup_minutes,
     paymentMethods: [
-      { id: 'cod', label: 'Cash on Delivery', enabled: !!s.pay_cod },
-      { id: 'upi', label: 'UPI / QR Payment', enabled: !!s.pay_upi },
-      { id: 'card', label: 'Credit / Debit Card', enabled: !!s.pay_card },
-      { id: 'wallet', label: 'Digital Wallet', enabled: !!s.pay_wallet },
+      { id: 'cod', label: 'Cash on Delivery', enabled: !!st.pay_cod },
+      { id: 'upi', label: 'UPI / QR Payment', enabled: !!st.pay_upi },
+      { id: 'card', label: 'Credit / Debit Card', enabled: !!st.pay_card },
+      { id: 'wallet', label: 'Digital Wallet', enabled: !!st.pay_wallet },
     ],
   };
 }

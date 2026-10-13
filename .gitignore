@@ -7,3 +7,10 @@ client/public/images/uploads/
 .env
 .tools/
 libs/
+
+.wrangler/
+shots/
+deploy/
+wrangler.local.jsonc
+ui-*.mjs
+diag*.mjs

@@ -1,5 +1,3 @@
-import crypto from 'node:crypto';
-
 export class HttpError extends Error {
   constructor(status, message, details) {
     super(message);
@@ -8,22 +6,22 @@ export class HttpError extends Error {
   }
 }
 
-export const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
 export const uid = () => crypto.randomUUID();
 
 export const now = () => Date.now();
 
-export function setCookie(res, name, value, opts = {}) {
-  res.cookie(name, value, {
-    httpOnly: true,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: opts.maxAge ?? 30 * 24 * 60 * 60 * 1000,
-    ...opts,
-  });
+export function randomHex(bytes) {
+  const buf = crypto.getRandomValues(new Uint8Array(bytes));
+  return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
 }
 
 export function parseJson(text, fallback) {
   try { return JSON.parse(text); } catch { return fallback; }
+}
+
+/** Reads a JSON request body. Empty body → {}. Malformed → 400 (same as the old express.json error). */
+export async function readJson(c) {
+  const text = await c.req.text();
+  if (!text) return {};
+  try { return JSON.parse(text); } catch { throw new HttpError(400, 'Invalid request body.'); }
 }

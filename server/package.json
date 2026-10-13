@@ -6,13 +6,18 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "seed": "node src/seed.js",
+    "seed": "node src/seed-cli.js",
     "test": "node --test \"tests/*.test.mjs\""
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.4",
     "cookie-parser": "^1.4.7",
     "express": "^5.3.0",
+    "hono": "^4.13.13",
     "multer": "^2.4.0",
     "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

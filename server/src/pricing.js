@@ -2,26 +2,27 @@ import { all, get } from './db.js';
 import { HttpError } from './util.js';
 import { getSettings } from './settings.js';
 
-export function loadProduct(productId) {
+export async function loadProduct(productId) {
   return get('SELECT * FROM products WHERE id = ? OR slug = ?', productId, productId);
 }
 
-export function loadProductOptions(productId) {
-  return {
-    sizes: all('SELECT size, name, delta_cents, is_default FROM product_sizes WHERE product_id = ? ORDER BY delta_cents', productId),
-    crusts: all('SELECT name, delta_cents, is_default FROM product_crusts WHERE product_id = ? ORDER BY delta_cents', productId),
-    toppings: all(`SELECT t.id, t.name, t.price_cents, t.is_veg, t.available
+export async function loadProductOptions(productId) {
+  const [sizes, crusts, toppings] = await Promise.all([
+    all('SELECT size, name, delta_cents, is_default FROM product_sizes WHERE product_id = ? ORDER BY delta_cents', productId),
+    all('SELECT name, delta_cents, is_default FROM product_crusts WHERE product_id = ? ORDER BY delta_cents', productId),
+    all(`SELECT t.id, t.name, t.price_cents, t.is_veg, t.available
       FROM product_toppings pt JOIN toppings t ON t.id = pt.topping_id
       WHERE pt.product_id = ? ORDER BY t.is_veg DESC, t.name`, productId),
-  };
+  ]);
+  return { sizes, crusts, toppings };
 }
 
 /**
  * Validates a selection against the catalog and returns the unit price in cents.
  * All prices come from the database — the client price is never trusted.
  */
-export function priceItem({ product, options, selection }) {
-  const settings = getSettings();
+export async function priceItem({ product, options, selection }) {
+  const settings = await getSettings();
   const isPizza = options.sizes.length > 0 || options.crusts.length > 0;
   let unit = product.price_cents;
   const detail = { sizeKey: null, size: null, crust: null, toppings: [], extraCheese: false };
@@ -66,18 +67,18 @@ export function priceItem({ product, options, selection }) {
 }
 
 /** Recomputes the whole cart from the current catalog (fresh prices every time). */
-export function computeCart(cartId) {
-  const settings = getSettings();
-  const cart = get('SELECT * FROM carts WHERE id = ?', cartId);
-  const rows = all('SELECT * FROM cart_items WHERE cart_id = ? ORDER BY created_at', cartId);
+export async function computeCart(cartId) {
+  const settings = await getSettings();
+  const cart = await get('SELECT * FROM carts WHERE id = ?', cartId);
+  const rows = await all('SELECT * FROM cart_items WHERE cart_id = ? ORDER BY created_at', cartId);
   const items = [];
   let subtotalCents = 0;
 
   for (const row of rows) {
-    const product = loadProduct(row.product_id);
+    const product = await loadProduct(row.product_id);
     if (!product) continue;
-    const options = loadProductOptions(product.id);
-    const priced = priceItem({
+    const options = await loadProductOptions(product.id);
+    const priced = await priceItem({
       product,
       options,
       selection: {
@@ -112,7 +113,7 @@ export function computeCart(cartId) {
   let discountCents = 0;
   if (cart?.promo_code) {
     try {
-      const applied = validatePromo(cart.promo_code, subtotalCents);
+      const applied = await validatePromo(cart.promo_code, subtotalCents);
       promo = applied.promo;
       discountCents = applied.discountCents;
     } catch {
@@ -139,14 +140,15 @@ export function computeCart(cartId) {
   };
 }
 
-export function validatePromo(code, subtotalCents) {
+export async function validatePromo(code, subtotalCents) {
   const normalized = String(code || '').trim().toUpperCase();
   if (!normalized) throw new HttpError(400, 'Enter a promo code.');
-  const promo = get('SELECT * FROM promos WHERE code = ?', normalized);
+  const promo = await get('SELECT * FROM promos WHERE code = ?', normalized);
   if (!promo || !promo.active) throw new HttpError(400, 'That promo code is not valid.');
   if (promo.expires_at && promo.expires_at < Date.now()) throw new HttpError(400, 'That promo code has expired.');
   if (subtotalCents < promo.min_order_cents) {
-    throw new HttpError(400, `This code requires a minimum order of ${formatCents(promo.min_order_cents, getSettings())}.`);
+    const settings = await getSettings();
+    throw new HttpError(400, `This code requires a minimum order of ${formatCents(promo.min_order_cents, settings)}.`);
   }
   let discountCents = promo.type === 'percent'
     ? Math.round(subtotalCents * promo.value / 100)
@@ -159,12 +161,13 @@ export function validatePromo(code, subtotalCents) {
   };
 }
 
-export function computeTotals({ subtotalCents, discountCents = 0, fulfilment, settings = getSettings() }) {
+export async function computeTotals({ subtotalCents, discountCents = 0, fulfilment, settings }) {
+  const st = settings ?? await getSettings();
   const deliveryCents = fulfilment === 'pickup'
     ? 0
-    : (subtotalCents >= settings.free_delivery_min_cents ? 0 : settings.delivery_fee_cents);
+    : (subtotalCents >= st.free_delivery_min_cents ? 0 : st.delivery_fee_cents);
   const taxable = Math.max(0, subtotalCents - discountCents);
-  const taxCents = Math.round(taxable * settings.tax_pct / 100);
+  const taxCents = Math.round(taxable * st.tax_pct / 100);
   return {
     subtotalCents,
     discountCents,
