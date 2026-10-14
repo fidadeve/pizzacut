@@ -26,7 +26,17 @@ export async function batch(statements) {
 
 // D1's exec() splits input on newlines, which truncates multi-line DDL.
 // Run each statement separately, collapsed onto a single line instead.
+import { ORDER_MIGRATIONS } from './schema.js';
+
 export async function ensureSchema() {
+  // Column migrations must run BEFORE the schema statements — the DDL includes
+  // an index on orders.assigned_rider_id which legacy databases don't have yet.
+  // On a fresh DB the ALTERs fail harmlessly (no such table) and are tolerated.
+  for (const sql of ORDER_MIGRATIONS) {
+    try { await run(`${sql};`); } catch (err) {
+      if (!/duplicate column|already exists|no such table/i.test(String(err?.message))) throw err;
+    }
+  }
   const statements = SCHEMA_SQL
     .split(';')
     .map(sql => sql.replace(/\s+/g, ' ').trim())

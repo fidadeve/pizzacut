@@ -8,6 +8,7 @@ import { useToast } from '../lib/toast';
 import type { Order } from '../lib/types';
 import { money } from '../lib/format';
 import { useSelectedAddress } from '../components/AddressSelector';
+import { DeliveryLocationPicker, type CapturedLocation } from '../components/DeliveryLocationPicker';
 import { EmptyState, Spinner } from '../components/ui';
 import { Icon, type IconName } from '../components/icons';
 
@@ -27,6 +28,8 @@ export function CheckoutPage() {
   const [email, setEmail] = useState('');
   const [useNewAddress, setUseNewAddress] = useState(false);
   const [addr, setAddr] = useState({ label: 'Home', line1: '', line2: '', city: '', zip: '' });
+  const [deliveryLocation, setDeliveryLocation] = useState<CapturedLocation | null>(null);
+  const [landmark, setLandmark] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('');
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -81,6 +84,8 @@ export function CheckoutPage() {
         address: addressForOrder,
         paymentMethod,
         notes: notes.trim(),
+        location: fulfilment === 'delivery' && deliveryLocation ? deliveryLocation : undefined,
+        landmark: fulfilment === 'delivery' ? landmark.trim() : undefined,
         promoCode: cart?.promo?.code,
       });
       push('Order placed — the kitchen is on it!');
@@ -175,6 +180,24 @@ export function CheckoutPage() {
         </section>
       )}
 
+      {/* Mandatory delivery location (delivery orders only) */}
+      {fulfilment === 'delivery' && (
+        <section className="mt-6">
+          <h2 className="mb-2 text-base text-ink">Your location</h2>
+          <DeliveryLocationPicker
+            value={deliveryLocation}
+            onChange={setDeliveryLocation}
+            landmark={landmark}
+            onLandmark={setLandmark}
+          />
+          {!deliveryLocation && (
+            <p className="mt-2 text-[12px] font-bold text-brand">
+              A confirmed location is required before a delivery order can be placed.
+            </p>
+          )}
+        </section>
+      )}
+
       {/* Contact */}
       <section className="mt-6">
         <h2 className="mb-2 text-base text-ink">Contact details</h2>
@@ -245,7 +268,10 @@ export function CheckoutPage() {
           <div className="flex items-baseline justify-between pt-1"><dt className="text-base font-extrabold">Total</dt><dd className="font-display text-2xl text-brand">{money(total, sym)}</dd></div>
         </dl>
         {formError && <p className="mt-3 rounded-2xl bg-brand-soft p-3 text-[13px] font-bold text-brand" role="alert">{formError}</p>}
-        <button onClick={() => void placeOrder()} disabled={submitting || busy || !paymentMethod}
+        {fulfilment === 'delivery' && !deliveryLocation && (
+          <p className="mt-2 text-center text-[12px] font-bold text-brand">Confirm your delivery location above to enable this button.</p>
+        )}
+        <button onClick={() => void placeOrder()} disabled={submitting || busy || !paymentMethod || (fulfilment === 'delivery' && !deliveryLocation)}
           className="btn btn-primary mt-4 w-full text-base">
           {submitting ? <><Spinner className="h-5 w-5" /> Placing your order…</> : `Place order · ${money(total, sym)}`}
         </button>

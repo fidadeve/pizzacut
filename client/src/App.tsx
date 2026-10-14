@@ -17,6 +17,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { LoginPage } from './pages/LoginPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { AdminApp } from './pages/admin/AdminApp';
+import { RiderApp } from './pages/rider/RiderApp';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -58,6 +59,7 @@ export default function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Route>
         <Route path="/admin/*" element={<AdminApp />} />
+        <Route path="/rider/*" element={<RiderApp />} />
       </Routes>
     </>
   );

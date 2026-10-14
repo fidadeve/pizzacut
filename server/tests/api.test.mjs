@@ -160,6 +160,7 @@ test('checkout: server-side validation and authoritative totals', async () => {
     customer: { name: 'Test Customer', phone: '+1 555 123 4567' },
     fulfilment: 'delivery',
     address: { line1: '42 Pizza Lane', city: 'Foodtown', zip: '12345' },
+    location: { lat: 40.7128, lng: -74.006, accuracy: 18 },
     paymentMethod: 'cod',
   });
   assert.equal(res.status, 201);
@@ -266,14 +267,16 @@ test('admin: RBAC, product CRUD, promos, order status, settings, sales summary',
   assert.equal(badTopping.status, 400);
   await admin.patch('/api/admin/toppings/top-jalapeno', { available: true });
 
-  // orders management
+  // orders management (statuses now follow the validated transition chain)
   const orders = await admin.get('/api/admin/orders');
   assert.ok(orders.json.orders.length >= 2);
   const target = orders.json.orders.find(o => o.fulfilment === 'delivery');
-  const upd = await admin.patch(`/api/admin/orders/${target.id}`, { status: 'preparing' });
+  const upd = await admin.patch(`/api/admin/orders/${target.id}`, { status: 'confirmed' });
   assert.equal(upd.status, 200);
+  assert.equal((await admin.patch(`/api/admin/orders/${target.id}`, { status: 'preparing' })).status, 200);
   const invalidTransition = await admin.patch(`/api/admin/orders/${target.id}`, { status: 'ready_for_pickup' });
   assert.equal(invalidTransition.status, 400);
+  assert.equal((await admin.patch(`/api/admin/orders/${target.id}`, { status: 'picked_up' })).status, 200);
   await admin.patch(`/api/admin/orders/${target.id}`, { status: 'delivered' });
 
   // customer sees the delivered status
@@ -306,10 +309,13 @@ test('admin: RBAC, product CRUD, promos, order status, settings, sales summary',
 test('order status auto-advance reflects real order data', async () => {
   const c = client();
   await c.post('/api/cart/items', { productId: 'prd-iced-tea' });
+  // Delivery orders now require a confirmed location; statuses follow the
+  // validated transition chain instead of random jumps.
   const res = await c.post('/api/orders', {
     customer: { name: 'Advance Tester', phone: '+1 555 222 3333' },
     fulfilment: 'delivery',
     address: { line1: '9 Tracking Road', city: 'Foodtown', zip: '12345' },
+    location: { lat: 40.7128, lng: -74.006, accuracy: 25 },
     paymentMethod: 'cod',
   });
   const id = res.json.order.id;
@@ -318,7 +324,9 @@ test('order status auto-advance reflects real order data', async () => {
   assert.ok(t1.json.order.etaMinutes > 0);
   const admin = client();
   await admin.post('/api/auth/login', { email: 'admin@pizzacut.com', password: 'admin123' });
-  await admin.patch(`/api/admin/orders/${id}`, { status: 'out_for_delivery' });
+  for (const status of ['confirmed', 'assigned', 'accepted', 'preparing', 'picked_up', 'out_for_delivery']) {
+    await admin.patch(`/api/admin/orders/${id}`, { status });
+  }
   const t2 = await c.get(`/api/orders/${id}`);
   assert.equal(t2.json.order.status, 'out_for_delivery');
   assert.equal(t2.json.order.tracking.stages[3].state, 'current');

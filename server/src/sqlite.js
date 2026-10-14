@@ -4,7 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCHEMA_SQL } from './schema.js';
+// Schema creation/migration is handled centrally by ensureSchema() (db.js) —
+// both the node server and the Worker entry points call it after configureDb.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,7 +18,6 @@ export function defaultDbPath() {
 export function createSqliteBackend(dbPath = defaultDbPath()) {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL;\nPRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA_SQL);
   return {
     all: (sql, params) => db.prepare(sql).all(...params),
     get: (sql, params) => db.prepare(sql).get(...params) ?? null,

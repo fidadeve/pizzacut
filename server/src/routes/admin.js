@@ -339,14 +339,16 @@ admin.get('/orders/:id', async (c) => {
   return c.json({ order: await orderPayload(o, await getSettings()) });
 });
 
-const statusSchema = z.object({
-  status: z.enum(['received', 'confirmed', 'preparing', 'out_for_delivery', 'ready_for_pickup', 'delivered', 'cancelled']),
-});
-
+// Legacy single-status endpoint, now transition-validated and audited.
 admin.patch('/orders/:id', async (c) => {
   const o = await get('SELECT * FROM orders WHERE id = ?', c.req.param('id'));
   if (!o) throw new HttpError(404, 'Order not found.');
-  const { status } = statusSchema.parse(await readJson(c));
+  const { status, note } = statusSchema.parse(await readJson(c));
+  const ctxUser = c.get('ctx').user;
+  const allowed = VALID_TRANSITIONS[o.status] ?? [];
+  if (!allowed.includes(status)) {
+    throw new HttpError(400, `An order that is ${FULL_LABELS[o.status] ?? o.status} cannot move to ${FULL_LABELS[status] ?? status}.`);
+  }
   if (status === 'out_for_delivery' && o.fulfilment === 'pickup') {
     throw new HttpError(400, 'Pickup orders cannot be marked out for delivery — use "Ready for Pickup".');
   }
@@ -354,7 +356,22 @@ admin.patch('/orders/:id', async (c) => {
     throw new HttpError(400, 'Delivery orders cannot be marked ready for pickup — use "Out for Delivery".');
   }
   const ts = now();
-  await run('UPDATE orders SET status = ?, status_updated_at = ?, updated_at = ? WHERE id = ?', status, ts, ts, o.id);
+  await run('UPDATE orders SET status = ?, status_updated_at = ?, delivered_at = ?, updated_at = ? WHERE id = ?',
+    status, ts, status === 'delivered' ? ts : o.delivered_at, ts, o.id);
+  await logHistory(o.id, {
+    from: o.status, to: status, actor: { role: 'admin', id: ctxUser.id, name: ctxUser.name },
+    note: note || null,
+  });
+  if (o.assigned_rider_id && ['cancelled', 'delivered', 'delivery_failed'].includes(status)) {
+    const rider = await get('SELECT user_id FROM riders WHERE id = ?', o.assigned_rider_id);
+    if (rider) {
+      await notify({
+        role: 'rider', userId: rider.user_id, orderId: o.id, type: 'status',
+        title: `${o.number} is now ${FULL_LABELS[status] ?? status}`,
+        body: status === 'cancelled' ? 'This delivery was cancelled by the store.' : undefined,
+      });
+    }
+  }
   return c.json({ ok: true, status });
 });
 
@@ -395,4 +412,265 @@ admin.put('/settings', async (c) => {
   }
   const updated = await updateSettings(body);
   return c.json({ settings: updated, public: await publicSettings(updated) });
+});
+
+/* ---------- Riders ---------- */
+import { hashPassword } from '../auth.js';
+import { assignOrder, logHistory, notify, getHistory, listNotifications, unreadCount, markNotificationsRead, ACTIVE_DELIVERY_STATUSES } from '../delivery.js';
+import { ALL_STATUSES, VALID_TRANSITIONS, FULL_LABELS } from '../tracking.js';
+
+const riderCreateSchema = z.object({
+  name: z.string().trim().min(2, 'Rider name is required.').max(60),
+  username: z.string().trim().min(3, 'Login ID must be at least 3 characters.').max(24)
+    .regex(/^[a-z0-9_.-]+$/i, 'Login ID can use letters, numbers, dots, dashes and underscores.'),
+  password: z.string().min(8, 'Password must be at least 8 characters.').max(128),
+  phone: z.string().trim().regex(/^[+()\-.\s\d]{7,18}$/, 'Enter a valid phone number.'),
+  vehicle: z.string().trim().max(60).optional().or(z.literal('')),
+  photo: z.string().trim().max(300).optional().or(z.literal('')),
+  status: z.enum(['active', 'inactive', 'suspended']).default('active'),
+});
+
+async function riderStats(riderId) {
+  const active = await get(`SELECT COUNT(*) c FROM orders WHERE assigned_rider_id = ? AND status IN ('assigned','accepted','picked_up','out_for_delivery')`, riderId);
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const deliveredToday = await get(`SELECT COUNT(*) c FROM orders WHERE assigned_rider_id = ? AND status = 'delivered' AND status_updated_at >= ?`, riderId, dayStart.getTime());
+  const totalDelivered = await get(`SELECT COUNT(*) c FROM orders WHERE assigned_rider_id = ? AND status = 'delivered'`, riderId);
+  const loc = await get('SELECT lat, lng, accuracy, updated_at FROM rider_locations WHERE rider_id = ?', riderId);
+  return {
+    activeDeliveries: active.c,
+    deliveredToday: deliveredToday.c,
+    totalDelivered: totalDelivered.c,
+    lastLocation: loc ? { lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy, updatedAt: loc.updated_at } : null,
+  };
+}
+
+function mapRider(r, stats) {
+  return {
+    id: r.id, userId: r.user_id, username: r.username, name: r.name,
+    phone: r.phone ?? r.user_phone ?? r.rider_phone, vehicle: r.vehicle, photo: r.photo,
+    status: r.status, availability: r.availability,
+    createdAt: r.created_at,
+    ...(stats ?? {}),
+  };
+}
+
+admin.get('/riders', async (c) => {
+  const rows = await all(
+    `SELECT r.*, u.name AS name, u.phone AS user_phone FROM riders r JOIN users u ON u.id = r.user_id
+     ORDER BY CASE r.status WHEN 'active' THEN 0 WHEN 'inactive' THEN 1 ELSE 2 END, r.created_at DESC`,
+  );
+  const riders = [];
+  for (const r of rows) riders.push(mapRider(r, await riderStats(r.id)));
+  return c.json({ riders });
+});
+
+admin.post('/riders', async (c) => {
+  const body = riderCreateSchema.parse(await readJson(c));
+  const username = body.username.toLowerCase();
+  const syntheticEmail = `rider+${username.replace(/[^a-z0-9]+/g, '.')}@pizzacut.internal`;
+  if (await get('SELECT id FROM riders WHERE username = ?', username)) {
+    throw new HttpError(409, 'That login ID is already taken.');
+  }
+  if (await get('SELECT id FROM users WHERE email = ?', syntheticEmail)) {
+    throw new HttpError(409, 'That login ID is already taken.');
+  }
+  const ts = now();
+  const userId = uid();
+  await run('INSERT INTO users (id, email, password_hash, name, phone, role, addresses, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    userId, syntheticEmail, await hashPassword(body.password), body.name, body.phone, 'rider', '[]', ts);
+  const id = uid();
+  await run(`INSERT INTO riders (id, user_id, username, phone, vehicle, photo, status, availability, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'offline', ?, ?)`,
+    id, userId, username, body.phone, body.vehicle || null, body.photo || null,
+    body.status, ts, ts);
+  const r = await get('SELECT r.*, u.name AS name FROM riders r JOIN users u ON u.id = r.user_id WHERE r.id = ?', id);
+  return c.json({ rider: mapRider(r, await riderStats(id)) }, 201);
+});
+
+admin.get('/riders/:id', async (c) => {
+  const r = await get('SELECT r.*, u.name AS name FROM riders r JOIN users u ON u.id = r.user_id WHERE r.id = ?', c.req.param('id'));
+  if (!r) throw new HttpError(404, 'Rider not found.');
+  const activeRows = await all(
+    `SELECT id, number, status, total_cents, created_at FROM orders
+     WHERE assigned_rider_id = ? AND status NOT IN ('delivered','cancelled') ORDER BY created_at DESC`, r.id);
+  const completedRows = await all(
+    `SELECT id, number, status, total_cents, delivered_at FROM orders
+     WHERE assigned_rider_id = ? AND status = 'delivered' ORDER BY status_updated_at DESC LIMIT 50`, r.id);
+  return c.json({
+    rider: mapRider(r, await riderStats(r.id)),
+    activeOrders: activeRows.map(o => ({ id: o.id, number: o.number, status: o.status, totalCents: o.total_cents, createdAt: o.created_at })),
+    completedOrders: completedRows.map(o => ({ id: o.id, number: o.number, status: o.status, totalCents: o.total_cents, createdAt: o.created_at })),
+  });
+});
+
+const riderUpdateSchema = riderCreateSchema.partial().omit({ username: true });
+
+admin.patch('/riders/:id', async (c) => {
+  const r = await get('SELECT r.* FROM riders r WHERE r.id = ?', c.req.param('id'));
+  if (!r) throw new HttpError(404, 'Rider not found.');
+  const body = riderUpdateSchema.parse(await readJson(c));
+  const ts = now();
+  let availability = r.availability;
+  if (body.status && body.status !== r.status) {
+    // Availability must stay consistent with the account status.
+    if (body.status !== 'active') availability = 'offline';
+    await notify({ role: 'rider', userId: r.user_id, type: 'account',
+      title: `Your account is now ${body.status}`,
+      body: body.status === 'active' ? 'You can sign in and take deliveries again.' : 'Contact the store manager for details.',
+    });
+  }
+  await run('UPDATE riders SET phone = ?, vehicle = ?, photo = ?, status = ?, availability = ?, updated_at = ? WHERE id = ?',
+    body.phone ?? r.phone, body.vehicle !== undefined ? (body.vehicle || null) : r.vehicle,
+    body.photo !== undefined ? (body.photo || null) : r.photo,
+    body.status ?? r.status, availability, ts, r.id);
+  if (body.name || body.phone) {
+    await run('UPDATE users SET name = COALESCE(?, name), phone = COALESCE(?, phone) WHERE id = ?',
+      body.name ?? null, body.phone ?? null, r.user_id);
+  }
+  if (body.password) {
+    await run('UPDATE users SET password_hash = ? WHERE id = ?', await hashPassword(body.password), r.user_id);
+    await notify({ role: 'rider', userId: r.user_id, type: 'account',
+      title: 'Your password was reset', body: 'Sign in with the new password from your manager.' });
+  }
+  const updated = await get('SELECT r.*, u.name AS name FROM riders r JOIN users u ON u.id = r.user_id WHERE r.id = ?', r.id);
+  return c.json({ rider: mapRider(updated, await riderStats(r.id)) });
+});
+
+/* ---------- Notifications for the admin panel ---------- */
+admin.get('/notifications', async (c) => {
+  const ctx = c.get('ctx');
+  return c.json({
+    notifications: await listNotifications('admin', null),
+    unread: await unreadCount('admin', ctx.user.id),
+  });
+});
+
+admin.post('/notifications/read', async (c) => {
+  await markNotificationsRead('admin', null);
+  return c.json({ ok: true });
+});
+
+/* ---------- Rider assignment & delivery ops ---------- */
+const assignSchema = z.object({ riderId: z.string().min(1) });
+
+admin.patch('/orders/:id/assign', async (c) => {
+  const order = await get('SELECT * FROM orders WHERE id = ? OR number = ?', c.req.param('id'), String(c.req.param('id')).toUpperCase());
+  if (!order) throw new HttpError(404, 'Order not found.');
+  const { riderId } = assignSchema.parse(await readJson(c));
+  const rider = await get(
+    `SELECT r.*, u.name AS rider_name FROM riders r JOIN users u ON u.id = r.user_id WHERE r.id = ?`, riderId);
+  if (!rider) throw new HttpError(404, 'Rider not found.');
+  const ctxUser = c.get('ctx').user;
+  const toStatus = await assignOrder(order, rider, ctxUser);
+  const updated = await get('SELECT * FROM orders WHERE id = ?', order.id);
+  const assignment = await get('SELECT * FROM rider_assignments WHERE order_id = ? AND unassigned_at IS NULL', order.id);
+  return c.json({
+    ok: true,
+    status: toStatus,
+    assignedRider: { id: rider.id, name: rider.rider_name, username: rider.username, phone: rider.phone },
+    assignmentId: assignment?.id ?? null,
+  });
+});
+
+// Full delivery-operations snapshot: summary, riders, and filtered orders.
+admin.get('/delivery/ops', async (c) => {
+  const { status, rider, date } = c.req.query();
+  const where = [];
+  const params = [];
+  if (rider === 'unassigned') { where.push('(o.assigned_rider_id IS NULL AND o.fulfilment = ?)'); params.push('delivery'); }
+  else if (rider) { where.push('o.assigned_rider_id = ?'); params.push(String(rider)); }
+  if (status && status !== 'all') { where.push('o.status = ?'); params.push(String(status)); }
+  if (date) {
+    const dayStart = new Date(`${date}T00:00:00`).getTime();
+    where.push('o.created_at >= ? AND o.created_at < ?');
+    params.push(dayStart, dayStart + 86_400_000);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = await all(
+    `SELECT o.*, rn.name AS rider_name, rn.phone AS rider_phone
+     FROM orders o
+     LEFT JOIN riders r ON r.id = o.assigned_rider_id
+     LEFT JOIN users rn ON rn.id = r.user_id
+     ${whereSql} ORDER BY o.created_at DESC LIMIT 300`, ...params);
+  const orders = rows.map(o => ({
+    id: o.id, number: o.number, customer: o.customer_name, phone: o.phone,
+    fulfilment: o.fulfilment, status: o.status, totalCents: o.total_cents,
+    paymentMethod: o.payment_method, createdAt: o.created_at, statusUpdatedAt: o.status_updated_at,
+    assignedRiderId: o.assigned_rider_id, riderName: o.rider_name, riderPhone: o.rider_phone,
+    hasLocation: o.delivery_lat != null && o.delivery_lng != null,
+    itemCount: undefined,
+  }));
+  for (const o of orders) {
+    const cnt = await get('SELECT COALESCE(SUM(qty),0) c FROM order_items WHERE order_id = ?', o.id);
+    o.itemCount = cnt.c;
+  }
+  const sum = async (sql) => (await get(sql)).c;
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const dl = "o.fulfilment = 'delivery'";
+  const summary = {
+    activeDeliveries: await sum(`SELECT COUNT(*) c FROM orders o WHERE ${dl} AND status IN ('assigned','accepted','picked_up','out_for_delivery')`),
+    unassignedDelivery: await sum(`SELECT COUNT(*) c FROM orders o WHERE ${dl} AND assigned_rider_id IS NULL AND status IN ('received','confirmed','preparing')`),
+    completedToday: await sum(`SELECT COUNT(*) c FROM orders o WHERE ${dl} AND status = 'delivered' AND status_updated_at >= ${dayStart.getTime()}`),
+    failedActive: await sum(`SELECT COUNT(*) c FROM orders o WHERE ${dl} AND status = 'delivery_failed'`),
+    issuesOpen: await sum(`SELECT COUNT(*) c FROM orders o WHERE ${dl} AND EXISTS (SELECT 1 FROM order_history h WHERE h.order_id = o.id AND h.kind = 'issue' AND h.created_at >= ${dayStart.getTime()})`),
+  };
+  const riderRows = await all(
+    `SELECT r.*, u.name AS name, u.phone AS user_phone FROM riders r JOIN users u ON u.id = r.user_id
+     ORDER BY CASE r.status WHEN 'active' THEN 0 WHEN 'inactive' THEN 1 ELSE 2 END, r.created_at DESC`);
+  const riders = [];
+  for (const r of riderRows) riders.push(mapRider(r, await riderStats(r.id)));
+  return c.json({ summary, riders, orders, statuses: ALL_STATUSES });
+});
+
+// Live rider position for the admin delivery-ops map (polled while expanded).
+admin.get('/orders/:id/location', async (c) => {
+  const id = c.req.param('id');
+  const o = await get('SELECT * FROM orders WHERE id = ? OR number = ?', id, String(id).toUpperCase());
+  if (!o) throw new HttpError(404, 'Order not found.');
+  const active = !!o.assigned_rider_id && ACTIVE_DELIVERY_STATUSES.includes(o.status);
+  if (!active) return c.json({ active: false, status: o.status, rider: null, location: null, customer: null });
+
+  const r = await get(
+    `SELECT r.id, r.username, r.vehicle, u.name, u.phone
+     FROM riders r JOIN users u ON u.id = r.user_id WHERE r.id = ?`,
+    o.assigned_rider_id,
+  );
+  const loc = await get('SELECT lat, lng, accuracy, updated_at FROM rider_locations WHERE rider_id = ?', o.assigned_rider_id);
+  return c.json({
+    active: true,
+    status: o.status,
+    rider: r ? { id: r.id, name: r.name, username: r.username, phone: r.phone, vehicle: r.vehicle } : null,
+    location: loc && now() - loc.updated_at <= 60_000
+      ? { lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy, updatedAt: loc.updated_at }
+      : null,
+    customer: o.delivery_lat != null && o.delivery_lng != null
+      ? { lat: o.delivery_lat, lng: o.delivery_lng, accuracy: o.delivery_accuracy, landmark: o.landmark }
+      : null,
+  });
+});
+
+// Full order detail incl. history + assignment records for the admin order screen.
+admin.get('/orders/:id/full', async (c) => {
+  const id = c.req.param('id');
+  const o = await get('SELECT * FROM orders WHERE id = ? OR number = ?', id, String(id).toUpperCase());
+  if (!o) throw new HttpError(404, 'Order not found.');
+  const assignments = await all(
+    `SELECT a.id, a.rider_id, a.assigned_by, a.unassigned_at, a.created_at, u.name, r.username
+     FROM rider_assignments a JOIN riders r ON r.id = a.rider_id JOIN users u ON u.id = r.user_id
+     WHERE a.order_id = ? ORDER BY a.created_at DESC`, o.id);
+  return c.json({
+    order: await orderPayload(o, await getSettings()),
+    history: await getHistory(o.id),
+    assignments: assignments.map(a => ({
+      id: a.id, riderId: a.rider_id, riderName: a.name, riderUsername: a.username,
+      assignedBy: a.assigned_by, unassignedAt: a.unassigned_at, createdAt: a.created_at,
+    })),
+  });
+});
+
+// Replace the old single-status PATCH with the transition-validated version.
+const statusSchema = z.object({
+  status: z.enum(['received', 'confirmed', 'assigned', 'accepted', 'preparing', 'ready_for_pickup',
+    'picked_up', 'out_for_delivery', 'delivered', 'delivery_failed', 'cancelled']),
+  note: z.string().trim().max(200).optional(),
 });

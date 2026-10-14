@@ -9,13 +9,18 @@ import { Icon } from '../../components/icons';
 import { Spinner } from '../../components/ui';
 import { AdminOverview } from './AdminOverview';
 import { AdminOrders } from './AdminOrders';
+import { AdminDeliveryOps } from './AdminDeliveryOps';
+import { AdminRiders } from './AdminRiders';
 import { AdminMenu } from './AdminMenu';
 import { AdminOffers } from './AdminOffers';
 import { AdminSettings } from './AdminSettings';
+import { AdminNotifications } from './AdminNotifications';
 
 const TABS = [
   { to: '/admin', label: 'Overview', icon: 'grid' as const, end: true },
   { to: '/admin/orders', label: 'Orders', icon: 'receipt' as const },
+  { to: '/admin/delivery', label: 'Delivery', icon: 'bike' as const },
+  { to: '/admin/riders', label: 'Riders', icon: 'user' as const },
   { to: '/admin/menu', label: 'Menu', icon: 'bag' as const },
   { to: '/admin/offers', label: 'Offers', icon: 'tag' as const },
   { to: '/admin/settings', label: 'Settings', icon: 'edit' as const },
@@ -88,6 +93,7 @@ function AdminShell() {
             <p className="truncate text-[11.5px] font-bold text-muted">Staff dashboard · {user?.email}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <AdminNotifications />
             <Link to="/" className="btn btn-outline btn-sm">View store</Link>
             <button onClick={() => { void logout().then(() => navigate('/', { replace: true })); }} className="btn btn-ghost btn-sm">
               <Icon name="logout" className="h-4 w-4" /> Sign out
@@ -136,6 +142,8 @@ export function AdminApp() {
       <Route element={<AdminShell />}>
         <Route index element={<AdminOverview />} />
         <Route path="orders" element={<AdminOrders />} />
+        <Route path="delivery" element={<AdminDeliveryOps />} />
+        <Route path="riders" element={<AdminRiders />} />
         <Route path="menu" element={<AdminMenu />} />
         <Route path="offers" element={<AdminOffers />} />
         <Route path="settings" element={<AdminSettings />} />

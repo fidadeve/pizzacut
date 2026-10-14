@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../lib/api';
 import { useFetch } from '../../lib/useFetch';
+import { AdminOrderDetailPanel } from './AdminOrderDetail';
 import { useSettings } from '../../lib/settings';
 import { useToast } from '../../lib/toast';
 import type { Order, OrderStatus } from '../../lib/types';
@@ -11,17 +12,21 @@ import { Icon } from '../../components/icons';
 interface OrderRow { id: string; number: string; customer: string; phone: string; totalCents: number; status: string; fulfilment: 'delivery' | 'pickup'; createdAt: number; itemCount: number; }
 
 const STATUS_LABELS: Record<string, string> = {
-  received: 'Received', confirmed: 'Confirmed', preparing: 'Preparing',
-  out_for_delivery: 'Out for delivery', ready_for_pickup: 'Ready for pickup',
-  delivered: 'Delivered', cancelled: 'Cancelled', all: 'All',
+  received: 'Received', confirmed: 'Confirmed', assigned: 'Assigned', accepted: 'Accepted', preparing: 'Preparing',
+  out_for_delivery: 'Out for delivery', ready_for_pickup: 'Ready for pickup', picked_up: 'Picked up',
+  delivered: 'Delivered', delivery_failed: 'Failed', cancelled: 'Cancelled', all: 'All',
 };
 
 const NEXT_ACTIONS: Record<string, OrderStatus[]> = {
   received: ['confirmed', 'cancelled'],
-  confirmed: ['preparing', 'cancelled'],
-  preparing: ['out_for_delivery', 'ready_for_pickup', 'delivered'],
-  out_for_delivery: ['delivered'],
-  ready_for_pickup: ['delivered'],
+  confirmed: ['assigned', 'preparing', 'cancelled'],
+  assigned: ['accepted', 'preparing', 'picked_up', 'cancelled'],
+  accepted: ['preparing', 'picked_up', 'cancelled'],
+  preparing: ['ready_for_pickup', 'picked_up', 'cancelled'],
+  picked_up: ['out_for_delivery', 'delivered', 'cancelled'],
+  out_for_delivery: ['delivered', 'delivery_failed', 'cancelled'],
+  ready_for_pickup: ['picked_up', 'out_for_delivery', 'cancelled'],
+  delivery_failed: ['out_for_delivery', 'delivered', 'cancelled'],
   delivered: [],
   cancelled: [],
 };
@@ -109,28 +114,9 @@ export function AdminOrders() {
                   <div className="border-t border-line bg-surface/60 p-4">
                     {!detail.loading && order && order.id === row.id ? (
                       <>
-                        <ul className="space-y-2">
-                          {order.items.map(item => (
-                            <li key={item.id} className="flex items-center gap-3 text-[13px]">
-                              <img src={item.image} alt="" className="h-10 w-10 rounded-xl object-cover" />
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate font-extrabold text-ink">{item.qty} × {item.name}</span>
-                                <span className="block truncate text-[11.5px] font-semibold text-muted">
-                                  {[item.size, item.crust, ...item.toppings, item.extraCheese ? 'Extra cheese' : null].filter(Boolean).join(' · ') || 'As served'}
-                                </span>
-                              </span>
-                              <span className="font-bold">{money(item.lineTotalCents, sym)}</span>
-                            </li>
-                          ))}
-                        </ul>
-                        <div className="divider mt-3 space-y-1.5 pt-3 text-[12.5px] font-semibold text-muted">
-                          <p><Icon name="user" className="mr-1.5 inline h-3.5 w-3.5 text-brand" />{order.customer.name} · {order.customer.phone}</p>
-                          {order.address && <p><Icon name="pin" className="mr-1.5 inline h-3.5 w-3.5 text-brand" />{order.address.line1}{order.address.line2 ? `, ${order.address.line2}` : ''}, {order.address.city} {order.address.zip}</p>}
-                          <p><Icon name="cash" className="mr-1.5 inline h-3.5 w-3.5 text-brand" />{settings.paymentMethods.find(m => m.id === order.paymentMethod)?.label ?? order.paymentMethod} · total {money(order.totals.totalCents, sym)}{order.promoCode ? ` · promo ${order.promoCode}` : ''}</p>
-                          {order.notes && <p><Icon name="edit" className="mr-1.5 inline h-3.5 w-3.5 text-brand" />“{order.notes}”</p>}
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {NEXT_ACTIONS[order.status].filter(next =>
+                        <AdminOrderDetailPanel orderId={row.id} onAssigned={() => { void detail.retry(); void retry(); }} />
+                        <div className="mt-4 flex flex-wrap gap-2 border-t border-line pt-3">
+                          {(NEXT_ACTIONS[order.status] ?? []).filter(next =>
                             !(order.fulfilment === 'pickup' && next === 'out_for_delivery') &&
                             !(order.fulfilment === 'delivery' && next === 'ready_for_pickup')).map(next => (
                             <button key={next} disabled={updating} onClick={() => void setStatusFor(row.id, next)}
@@ -138,8 +124,8 @@ export function AdminOrders() {
                               Mark {STATUS_LABELS[next]}
                             </button>
                           ))}
-                          {NEXT_ACTIONS[order.status].length === 0 && (
-                            <p className="text-[12.5px] font-bold text-muted">No further actions for this order.</p>
+                          {(NEXT_ACTIONS[order.status] ?? []).length === 0 && (
+                            <p className="text-[12.5px] font-bold text-muted">No further status actions for this order.</p>
                           )}
                         </div>
                       </>

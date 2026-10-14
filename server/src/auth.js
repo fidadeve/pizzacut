@@ -51,6 +51,7 @@ export async function destroySession(token) {
   if (token) await run('DELETE FROM sessions WHERE token = ?', token);
 }
 
+// Same-site enforcement on the session cookie (no cross-site reads).
 export const sessionCookieOptions = { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: SESSION_TTL_S };
 
 /**
@@ -111,5 +112,17 @@ export async function requireAdmin(c, next) {
   const ctx = c.get('ctx');
   if (!ctx?.user) throw new HttpError(401, 'Please sign in to continue.');
   if (ctx.user.role !== 'admin') throw new HttpError(403, 'Staff access required.');
+  await next();
+}
+
+/** Guards every rider-portal API route. Also caches the rider row on ctx. */
+export async function requireRider(c, next) {
+  const ctx = c.get('ctx');
+  if (!ctx?.user) throw new HttpError(401, 'Please sign in to continue.');
+  if (ctx.user.role !== 'rider') throw new HttpError(403, 'Rider access required.');
+  const rider = await get('SELECT * FROM riders WHERE user_id = ?', ctx.user.id);
+  if (!rider) throw new HttpError(403, 'No rider profile found for this account.');
+  if (rider.status !== 'active') throw new HttpError(403, 'Your rider account is not active. Contact the PizzaCut team.');
+  ctx.rider = rider;
   await next();
 }

@@ -128,6 +128,12 @@ CREATE TABLE IF NOT EXISTS orders (
   payment_method TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'received',
   status_updated_at INTEGER NOT NULL,
+  assigned_rider_id TEXT,
+  delivery_lat REAL,
+  delivery_lng REAL,
+  delivery_accuracy REAL,
+  landmark TEXT,
+  delivered_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -152,4 +158,75 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS riders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  username TEXT NOT NULL UNIQUE,
+  phone TEXT,
+  vehicle TEXT,
+  photo TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended')),
+  availability TEXT NOT NULL DEFAULT 'offline',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rider_assignments (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  rider_id TEXT NOT NULL REFERENCES riders(id),
+  assigned_by TEXT NOT NULL,
+  unassigned_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS order_history (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'status',
+  actor_role TEXT NOT NULL,
+  actor_id TEXT,
+  actor_name TEXT,
+  note TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  recipient_role TEXT NOT NULL,
+  recipient_user_id TEXT,
+  order_id TEXT,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  read INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rider_locations (
+  rider_id TEXT PRIMARY KEY REFERENCES riders(id) ON DELETE CASCADE,
+  lat REAL NOT NULL,
+  lng REAL NOT NULL,
+  accuracy REAL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_rider ON orders(assigned_rider_id);
+CREATE INDEX IF NOT EXISTS idx_order_history_order ON order_history(order_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_role, read);
+CREATE INDEX IF NOT EXISTS idx_assignments_order ON rider_assignments(order_id);
 `;
+
+/** Column-level migrations for databases created before a column existed.
+ *  Each statement runs separately; "duplicate column" failures are expected
+ *  and silently tolerated (both node:sqlite and D1 behave this way). */
+export const ORDER_MIGRATIONS = [
+  'ALTER TABLE orders ADD COLUMN assigned_rider_id TEXT',
+  'ALTER TABLE orders ADD COLUMN delivery_lat REAL',
+  'ALTER TABLE orders ADD COLUMN delivery_lng REAL',
+  'ALTER TABLE orders ADD COLUMN delivery_accuracy REAL',
+  'ALTER TABLE orders ADD COLUMN landmark TEXT',
+];

@@ -26,6 +26,13 @@
   --color-line: #ECEAEA;
   --color-muted: #6E6870;
 
+  /* shadcn/ui tokens (used by installed registry components like mapcn) */
+  --color-background: #FFFFFF;
+  --color-foreground: #131114;
+  --color-muted-foreground: #6E6870;
+  --color-border: #ECEAEA;
+  --color-ring: #FF0018;
+
   --font-display: 'Lilita One', 'Arial Black', system-ui, sans-serif;
   --font-sans: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
 
@@ -60,6 +67,24 @@
   img { -webkit-user-drag: none; }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+  .maplibregl-popup-content {
+    @apply bg-transparent! shadow-none! p-0! rounded-none!;
+  }
+  .maplibregl-popup-tip {
+    @apply hidden!;
+  }
+  .maplibregl-ctrl-attrib {
+    @apply bg-background! text-muted-foreground! border-border! rounded-md! border! shadow-sm!;
+  }
+  .maplibregl-ctrl-attrib a {
+    @apply text-muted-foreground!;
+  }
+  .maplibregl-ctrl-attrib a:hover {
+    @apply text-foreground!;
+  }
+  .maplibregl-ctrl-attrib-button {
+    @apply bg-transparent! dark:invert;
   }
 }
 

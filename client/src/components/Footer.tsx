@@ -72,6 +72,9 @@ export function Footer() {
           <p>© {year} PizzaCut — Taste Maker. All rights reserved.</p>
           <p>Fresh dough daily · 100% real mozzarella · Hot delivery</p>
         </div>
+        <div className="mx-auto max-w-5xl px-4 pb-5 text-center text-[11.5px] font-semibold text-white/50">
+          Developed by Syed Fida Ullah · <a href="tel:03326972158" className="font-extrabold text-brand hover:underline">03326972158</a>
+        </div>
       </div>
     </footer>
   );

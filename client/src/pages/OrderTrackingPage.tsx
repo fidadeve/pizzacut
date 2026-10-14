@@ -4,7 +4,10 @@ import { api } from '../lib/api';
 import { useFetch } from '../lib/useFetch';
 import { useSettings } from '../lib/settings';
 import type { Order, OrderStatus } from '../lib/types';
-import { formatDate, money, timeUntil } from '../lib/format';
+import { formatDate, money, timeAgo, timeUntil } from '../lib/format';
+import { LocationMapEmbed, mapsNavLink } from '../components/LocationMap';
+import { LiveDeliveryMapBoundary as LiveDeliveryMap } from '../components/LiveMap';
+import type { RiderLiveLocation } from '../lib/types';
 import { ErrorState, Skeleton } from '../components/ui';
 import { Icon, type IconName } from '../components/icons';
 
@@ -30,6 +33,23 @@ export function OrderTrackingPage() {
     () => api.get<{ order: Order }>(`/orders/${encodeURIComponent(id)}`), [id],
   );
   const order = data?.order;
+
+  // Real-time rider position — poll only while an assigned delivery is in flight.
+  const liveActive = !!order && order.fulfilment === 'delivery' && !!order.rider
+    && ['assigned', 'accepted', 'picked_up', 'out_for_delivery'].includes(order.status);
+  const live = useFetch<RiderLiveLocation>(
+    () => api.get<RiderLiveLocation>(`/orders/${encodeURIComponent(id)}/rider-location`),
+    [id], liveActive,
+  );
+  const liveData = live.data;
+
+  // Poll the live rider feed faster than the general order refresh.
+  const refetchLive = live.retry;
+  useEffect(() => {
+    if (!liveActive) return;
+    const timer = setInterval(() => { void refetchLive(); }, 5_000);
+    return () => clearInterval(timer);
+  }, [liveActive, refetchLive]);
 
   // Poll while the kitchen is still moving the order forward.
   useEffect(() => {
@@ -123,6 +143,72 @@ export function OrderTrackingPage() {
           </p>
         )}
       </div>
+
+      {/* Rider card — only once the admin assigns someone */}
+      {order.rider && (
+        <div className="card mt-4 overflow-hidden">
+          <div className="p-4 pb-3">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base text-ink">Your Rider</h2>
+              {liveActive && (
+                <span className={`pill-badge ${liveData?.location ? 'bg-brand text-white' : 'bg-surface text-muted'}`}>
+                  {liveData?.location ? 'Live' : 'Tracking on'}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand text-white">
+                <Icon name="bike" className="h-5 w-5" />
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-[14.5px] font-extrabold text-ink">{order.rider.name}</p>
+                <p className="truncate text-[12px] font-semibold text-muted">{order.rider.username} · PizzaCut rider</p>
+              </div>
+              {order.rider.phone && (
+                <a href={`tel:${order.rider.phone.replace(/[^+\d]/g, '')}`} className="btn btn-outline btn-sm ml-auto shrink-0">
+                  <Icon name="phone" className="h-4 w-4" /> Call rider
+                </a>
+              )}
+            </div>
+          </div>
+
+          {/* Real-time "Your Rider" map */}
+          {liveActive && order.deliveryLocation && (
+            <div className="px-4 pb-4">
+              <LiveDeliveryMap
+                rider={liveData?.location ?? null}
+                destination={order.deliveryLocation}
+                riderLabel="Your rider"
+                destinationLabel="You"
+                live={!!liveData?.location}
+                className="h-56"
+                footer={liveData?.location
+                  ? `Rider location updated ${timeAgo(liveData.location.updatedAt)} · accuracy ±${Math.round(liveData.location.accuracy ?? 0)} m`
+                  : 'Waiting for your rider’s location… it appears as soon as they start moving.'}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Confirmed delivery pin + navigation */}
+      {order.fulfilment === 'delivery' && order.deliveryLocation && (
+        <div className="card mt-4 space-y-2 p-4">
+          <h2 className="text-base text-ink">Delivery pin</h2>
+          {/* Live map above already renders this pin — skip the duplicate embed. */}
+          {!liveActive && (
+            <LocationMapEmbed lat={order.deliveryLocation.lat} lng={order.deliveryLocation.lng} label="Your delivery" />
+          )}
+          {order.deliveryLocation.landmark && (
+            <p className="text-[12.5px] font-semibold text-muted">Landmark: {order.deliveryLocation.landmark}</p>
+          )}
+          {order.status === 'out_for_delivery' && (
+            <a href={mapsNavLink(order.deliveryLocation.lat, order.deliveryLocation.lng)} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm w-full justify-center">
+              <Icon name="pin" className="h-4 w-4" /> Open my address in Maps
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Order summary */}
       <div className="card mt-4 p-4">

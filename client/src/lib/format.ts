@@ -20,3 +20,13 @@ export function timeUntil(ts: number): string {
 export function pluralize(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
+
+/** "just now" / "12s ago" / "3 min ago" — for live-location freshness chips. */
+export function timeAgo(ts: number): string {
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (secs < 5) return 'just now';
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  return formatDate(ts);
+}
