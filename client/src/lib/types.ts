@@ -1,4 +1,4 @@
-export interface Category { id: string; slug: string; name: string; image: string; productCount: number; }
+export interface Category { id: string; slug: string; name: string; description: string; image: string; sortOrder: number; active: boolean; productCount: number; }
 
 export interface Size { size: 'small' | 'medium' | 'large'; name: string; deltaCents: number; isDefault: boolean; }
 export interface Crust { name: string; deltaCents: number; isDefault: boolean; }

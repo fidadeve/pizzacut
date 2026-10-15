@@ -6,8 +6,10 @@ import { getSettings, updateSettings, publicSettings, DEFAULT_SETTINGS } from '.
 import { loadProductOptions } from '../pricing.js';
 import { orderPayload } from './orders.js';
 import { trackingStages } from '../tracking.js';
+import { ALL_STATUSES, VALID_TRANSITIONS, FULL_LABELS } from '../tracking.js';
 import { uid, now, HttpError, randomHex, readJson } from '../util.js';
 import { putUpload } from '../storage.js';
+import { assignOrder, logHistory, notify, getHistory, listNotifications, unreadCount, markNotificationsRead, ACTIVE_DELIVERY_STATUSES } from '../delivery.js';
 
 export const admin = new Hono();
 admin.use('*', requireAdmin);
@@ -28,6 +30,14 @@ async function uniqueSlug(base, excludeId) {
     if (!row || row.id === excludeId) return slug;
     slug = `${base}-${++n}`;
   }
+}
+
+async function withCategory(row) {
+  const p = await get(
+    'SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p JOIN categories c ON c.id = p.category_id WHERE p.id = ?',
+    row.id,
+  );
+  return p;
 }
 
 /* ---------- Overview ---------- */
@@ -70,6 +80,142 @@ admin.get('/overview', async (c) => {
         + (byStatus.out_for_delivery || 0) + (byStatus.ready_for_pickup || 0),
     },
   });
+});
+
+/* ---------- Categories ---------- */
+const categoryCreateSchema = z.object({
+  slug: z.string().trim().min(1).max(40),
+  name: z.string().trim().min(1).max(80),
+  description: z.string().trim().max(400).default(''),
+  image: z.string().trim().max(300).default(''),
+  sortOrder: z.number().int().min(0).optional(),
+  active: z.boolean().default(true),
+}).strict();
+
+const categoryUpdateSchema = categoryCreateSchema.partial();
+
+function mapCategory(row) {
+  return {
+    id: row.id, slug: row.slug, name: row.name, description: row.description ?? '',
+    image: row.image ?? '', sortOrder: row.sort_order, active: row.active === 1,
+    productCount: Number(row.product_count ?? 0),
+  };
+}
+
+async function readCategory(id) {
+  const row = await get(
+    `SELECT c.*, COALESCE((
+       SELECT COUNT(*) FROM products p WHERE p.category_id = c.id AND p.available = 1
+     ), 0) AS product_count
+     FROM categories c WHERE c.id = ?`,
+    id,
+  );
+  if (!row) throw new HttpError(404, 'Category not found.');
+  return mapCategory(row);
+}
+
+admin.get('/categories', async (c) => {
+  const rows = await all(
+    `SELECT c.*, COALESCE((
+       SELECT COUNT(*) FROM products p WHERE p.category_id = c.id AND p.available = 1
+     ), 0) AS product_count
+     FROM categories c ORDER BY c.sort_order, c.name`,
+  );
+  return c.json({ categories: rows.map(mapCategory) });
+});
+
+admin.get('/categories/:id', async (c) => {
+  return c.json({ category: await readCategory(c.req.param('id')) });
+});
+
+admin.post('/categories', async (c) => {
+  const body = categoryCreateSchema.parse(await c.req.json());
+  if (await get('SELECT id FROM categories WHERE slug = ?', body.slug)) {
+    throw new HttpError(409, 'A category with that slug already exists.');
+  }
+  if (!body.name.trim()) throw new HttpError(400, 'Category name is required.');
+  if (body.name.trim().length > 80) throw new HttpError(400, 'Category name must be 80 characters or fewer.');
+  if (body.description != null && body.description.length > 400) {
+    throw new HttpError(400, 'Description must be 400 characters or fewer.');
+  }
+  if (body.image != null && body.image.length > 300) {
+    throw new HttpError(400, 'Image URL must be 300 characters or fewer.');
+  }
+  const id = `cat-${uid()}`;
+  const sortOrder = Number.isInteger(body.sortOrder)
+    ? body.sortOrder
+    : (await get('SELECT COALESCE(MAX(sort_order), 0) AS m FROM categories')).m;
+  await run(
+    `INSERT INTO categories (id, slug, name, description, image, sort_order, active)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    id, body.slug, body.name.trim(), body.description ?? '', body.image || null,
+    sortOrder, body.active ? 1 : 0,
+  );
+  return c.json({ category: await readCategory(id) }, 201);
+});
+
+admin.patch('/categories/:id', async (c) => {
+  const existing = await get('SELECT * FROM categories WHERE id = ?', c.req.param('id'));
+  if (!existing) throw new HttpError(404, 'Category not found.');
+  const body = categoryUpdateSchema.parse(await c.req.json());
+
+  if (body.name != null && body.name.trim() !== existing.name &&
+      existing.name.trim().toLowerCase() === body.name.trim().toLowerCase()) {
+    throw new HttpError(409, 'A category with that name already exists.');
+  }
+  if (body.slug != null && body.slug !== existing.slug &&
+      await get('SELECT id FROM categories WHERE slug = ?', body.slug)) {
+    throw new HttpError(409, 'A category with that slug already exists.');
+  }
+  if (body.name != null && body.name.length > 80) throw new HttpError(400, 'Category name must be 80 characters or fewer.');
+  if (body.description != null && body.description.length > 400) {
+    throw new HttpError(400, 'Description must be 400 characters or fewer.');
+  }
+  if (body.image != null && body.image.length > 300) {
+    throw new HttpError(400, 'Image URL must be 300 characters or fewer.');
+  }
+
+  const updates = [];
+  const params = [];
+  if (body.name != null) { updates.push('name = ?'); params.push(body.name.trim()); }
+  if (body.description != null) { updates.push('description = ?'); params.push(body.description ?? ''); }
+  if (body.image != null) { updates.push('image = ?'); params.push(body.image || null); }
+  if (body.slug != null && body.slug !== existing.slug) { updates.push('slug = ?'); params.push(body.slug); }
+  if (body.sortOrder != null) { updates.push('sort_order = ?'); params.push(body.sortOrder); }
+  if (body.active != null) { updates.push('active = ?'); params.push(body.active ? 1 : 0); }
+
+  if (updates.length === 0) {
+    return c.json({ category: mapCategory(existing) });
+  }
+  params.push(existing.id);
+  await run(`UPDATE categories SET ${updates.join(', ')} WHERE id = ?`, ...params);
+  return c.json({ category: await readCategory(existing.id) });
+});
+
+admin.delete('/categories/:id', async (c) => {
+  const existing = await get('SELECT * FROM categories WHERE id = ?', c.req.param('id'));
+  if (!existing) throw new HttpError(404, 'Category not found.');
+  if (existing.active === 0) throw new HttpError(400, 'Only active categories can be deleted.');
+  const productCount = await get('SELECT COUNT(*) c FROM products WHERE category_id = ?', existing.id);
+  if (productCount.c > 0) {
+    throw new HttpError(409, `Cannot delete “${existing.name}” — it has ${productCount.c} product${productCount.c === 1 ? '' : 's'} on the menu. Move those products to another category first.`);
+  }
+  await run('DELETE FROM categories WHERE id = ?', existing.id);
+  return c.json({ ok: true });
+});
+
+admin.post('/categories/reorder', async (c) => {
+  const body = z.object({ ids: z.array(z.string()).min(1) }).parse(await c.req.json());
+  const orderedIds = body.ids.filter(id => id.startsWith('cat-'));
+  if (orderedIds.length !== new Set(orderedIds).size) {
+    throw new HttpError(400, 'Category ids must be unique.');
+  }
+  for (const [i, id] of orderedIds.entries()) {
+    const row = await get('SELECT id FROM categories WHERE id = ?', id);
+    if (!row) throw new HttpError(400, `Unknown category id: ${id}`);
+    await run('UPDATE categories SET sort_order = ? WHERE id = ?', i, id);
+  }
+  return c.json({ ok: true });
 });
 
 /* ---------- Products ---------- */
@@ -163,8 +309,10 @@ async function replaceOptions(productId, body, { replaceSizes, replaceCrusts, re
 }
 
 admin.post('/products', async (c) => {
-  const body = productSchema.parse(await readJson(c));
-  if (!await get('SELECT id FROM categories WHERE id = ?', body.categoryId)) throw new HttpError(400, 'Choose a valid category.');
+  const body = productSchema.parse(await c.req.json());
+  if (!await get('SELECT id FROM categories WHERE id = ?', body.categoryId)) {
+    throw new HttpError(400, 'Choose a valid category.');
+  }
   const id = `prd-${uid()}`;
   await run(`INSERT INTO products (id, slug, name, description, category_id, price_cents, image, is_veg, spice_level, badge, discount_pct, available, is_combo, sort_order, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products), ?)`,
@@ -172,15 +320,17 @@ admin.post('/products', async (c) => {
     body.image || null, body.isVeg ? 1 : 0, body.spiceLevel, body.badge || null, body.discountPct,
     body.available ? 1 : 0, body.isCombo ? 1 : 0, now());
   await replaceOptions(id, body, { replaceSizes: !body.isCombo, replaceCrusts: !body.isCombo, replaceToppings: !body.isCombo });
-  const p = await get('SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p JOIN categories c ON c.id = p.category_id WHERE p.id = ?', id);
+  const p = await withCategory(await get('SELECT * FROM products WHERE id = ?', id));
   return c.json({ product: { ...mapAdminProduct(p), options: await loadProductOptions(id) } }, 201);
 });
 
 admin.patch('/products/:id', async (c) => {
   const existing = await get('SELECT * FROM products WHERE id = ?', c.req.param('id'));
   if (!existing) throw new HttpError(404, 'Product not found.');
-  const body = productSchema.partial().parse(await readJson(c));
-  if (body.categoryId && !await get('SELECT id FROM categories WHERE id = ?', body.categoryId)) throw new HttpError(400, 'Choose a valid category.');
+  const body = productSchema.partial().parse(await c.req.json());
+  if (body.categoryId && !await get('SELECT id FROM categories WHERE id = ?', body.categoryId)) {
+    throw new HttpError(400, 'Choose a valid category.');
+  }
   const fields = {
     name: body.name ?? existing.name,
     description: body.description ?? existing.description,
@@ -202,7 +352,7 @@ admin.patch('/products/:id', async (c) => {
   await replaceOptions(existing.id, { sizes: [], crusts: [], toppingIds: [], ...body }, {
     replaceSizes: body.sizes !== undefined, replaceCrusts: body.crusts !== undefined, replaceToppings: body.toppingIds !== undefined,
   });
-  const p = await get('SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p JOIN categories c ON c.id = p.category_id WHERE p.id = ?', existing.id);
+  const p = await withCategory(await get('SELECT * FROM products WHERE id = ?', existing.id));
   return c.json({ product: { ...mapAdminProduct(p), options: await loadProductOptions(existing.id) } });
 });
 
@@ -232,7 +382,7 @@ admin.get('/toppings', async (c) => {
 });
 
 admin.post('/toppings', async (c) => {
-  const body = toppingSchema.parse(await readJson(c));
+  const body = toppingSchema.parse(await c.req.json());
   const id = `top-${slugify(body.name)}-${randomHex(3)}`;
   await run('INSERT INTO toppings (id, name, price_cents, is_veg, available) VALUES (?, ?, ?, ?, ?)',
     id, body.name, body.priceCents, body.isVeg ? 1 : 0, body.available ? 1 : 0);
@@ -242,7 +392,7 @@ admin.post('/toppings', async (c) => {
 admin.patch('/toppings/:id', async (c) => {
   const t = await get('SELECT * FROM toppings WHERE id = ?', c.req.param('id'));
   if (!t) throw new HttpError(404, 'Topping not found.');
-  const body = toppingSchema.partial().parse(await readJson(c));
+  const body = toppingSchema.partial().parse(await c.req.json());
   await run('UPDATE toppings SET name = ?, price_cents = ?, is_veg = ?, available = ? WHERE id = ?',
     body.name ?? t.name, body.priceCents ?? t.price_cents,
     body.isVeg !== undefined ? (body.isVeg ? 1 : 0) : t.is_veg,
@@ -281,7 +431,7 @@ admin.get('/promos', async (c) => {
 });
 
 admin.post('/promos', async (c) => {
-  const body = promoSchema.parse(await readJson(c));
+  const body = promoSchema.parse(await c.req.json());
   if (body.type === 'percent' && body.value > 90) throw new HttpError(400, 'Percentage discounts cap at 90%.');
   if (await get('SELECT id FROM promos WHERE code = ?', body.code)) throw new HttpError(409, 'That code already exists.');
   const id = uid();
@@ -294,7 +444,7 @@ admin.post('/promos', async (c) => {
 admin.patch('/promos/:id', async (c) => {
   const p = await get('SELECT * FROM promos WHERE id = ?', c.req.param('id'));
   if (!p) throw new HttpError(404, 'Promo not found.');
-  const body = promoSchema.partial().parse(await readJson(c));
+  const body = promoSchema.partial().parse(await c.req.json());
   await run(`UPDATE promos SET code = ?, description = ?, type = ?, value = ?, min_order_cents = ?, max_discount_cents = ?, active = ? WHERE id = ?`,
     body.code ?? p.code, body.description ?? p.description, body.type ?? p.type, body.value ?? p.value,
     body.minOrderCents ?? p.min_order_cents, body.maxDiscountCents ?? p.max_discount_cents,
@@ -343,7 +493,7 @@ admin.get('/orders/:id', async (c) => {
 admin.patch('/orders/:id', async (c) => {
   const o = await get('SELECT * FROM orders WHERE id = ?', c.req.param('id'));
   if (!o) throw new HttpError(404, 'Order not found.');
-  const { status, note } = statusSchema.parse(await readJson(c));
+  const { status, note } = statusSchema.parse(await c.req.json());
   const ctxUser = c.get('ctx').user;
   const allowed = VALID_TRANSITIONS[o.status] ?? [];
   if (!allowed.includes(status)) {
@@ -404,7 +554,7 @@ const settingsSchema = z.object({
 });
 
 admin.put('/settings', async (c) => {
-  const body = settingsSchema.parse(await readJson(c));
+  const body = settingsSchema.parse(await c.req.json());
   const current = await getSettings();
   if (body.pay_cod === false && !body.pay_upi && !body.pay_card && !body.pay_wallet
     && !current.pay_upi && !current.pay_card && !current.pay_wallet) {
@@ -415,10 +565,6 @@ admin.put('/settings', async (c) => {
 });
 
 /* ---------- Riders ---------- */
-import { hashPassword } from '../auth.js';
-import { assignOrder, logHistory, notify, getHistory, listNotifications, unreadCount, markNotificationsRead, ACTIVE_DELIVERY_STATUSES } from '../delivery.js';
-import { ALL_STATUSES, VALID_TRANSITIONS, FULL_LABELS } from '../tracking.js';
-
 const riderCreateSchema = z.object({
   name: z.string().trim().min(2, 'Rider name is required.').max(60),
   username: z.string().trim().min(3, 'Login ID must be at least 3 characters.').max(24)
@@ -465,7 +611,7 @@ admin.get('/riders', async (c) => {
 });
 
 admin.post('/riders', async (c) => {
-  const body = riderCreateSchema.parse(await readJson(c));
+  const body = riderCreateSchema.parse(await c.req.json());
   const username = body.username.toLowerCase();
   const syntheticEmail = `rider+${username.replace(/[^a-z0-9]+/g, '.')}@pizzacut.internal`;
   if (await get('SELECT id FROM riders WHERE username = ?', username)) {
@@ -508,7 +654,7 @@ const riderUpdateSchema = riderCreateSchema.partial().omit({ username: true });
 admin.patch('/riders/:id', async (c) => {
   const r = await get('SELECT r.* FROM riders r WHERE r.id = ?', c.req.param('id'));
   if (!r) throw new HttpError(404, 'Rider not found.');
-  const body = riderUpdateSchema.parse(await readJson(c));
+  const body = riderUpdateSchema.parse(await c.req.json());
   const ts = now();
   let availability = r.availability;
   if (body.status && body.status !== r.status) {
@@ -556,7 +702,7 @@ const assignSchema = z.object({ riderId: z.string().min(1) });
 admin.patch('/orders/:id/assign', async (c) => {
   const order = await get('SELECT * FROM orders WHERE id = ? OR number = ?', c.req.param('id'), String(c.req.param('id')).toUpperCase());
   if (!order) throw new HttpError(404, 'Order not found.');
-  const { riderId } = assignSchema.parse(await readJson(c));
+  const { riderId } = assignSchema.parse(await c.req.json());
   const rider = await get(
     `SELECT r.*, u.name AS rider_name FROM riders r JOIN users u ON u.id = r.user_id WHERE r.id = ?`, riderId);
   if (!rider) throw new HttpError(404, 'Rider not found.');

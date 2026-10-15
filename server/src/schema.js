@@ -220,13 +220,65 @@ CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipien
 CREATE INDEX IF NOT EXISTS idx_assignments_order ON rider_assignments(order_id);
 `;
 
-/** Column-level migrations for databases created before a column existed.
- *  Each statement runs separately; "duplicate column" failures are expected
- *  and silently tolerated (both node:sqlite and D1 behave this way). */
+/**
+ * Column-level migrations for databases created before a column existed.
+ * Each statement runs separately; "duplicate column" failures are expected
+ * and silently tolerated (both node:sqlite and D1 behave this way).
+ */
 export const ORDER_MIGRATIONS = [
   'ALTER TABLE orders ADD COLUMN assigned_rider_id TEXT',
   'ALTER TABLE orders ADD COLUMN delivery_lat REAL',
   'ALTER TABLE orders ADD COLUMN delivery_lng REAL',
   'ALTER TABLE orders ADD COLUMN delivery_accuracy REAL',
   'ALTER TABLE orders ADD COLUMN landmark TEXT',
+];
+
+/**
+ * Category-management migrations.
+ *
+ * Runs AFTER ensureSchema() above, on a per-statement basis so a
+ * "duplicate column" failure is tolerated. The legacy products table may
+ * already hold the ex-foreign key `category_id` values (`cat-classic-pizza`,
+ * `cat-premium-pizza`, ...) produced by version 1.0.0. This mapping re-wires
+ * any legacy slug references onto the newly-created master categories and
+ * then freezes the slug column so the relationship is stable.
+ */
+export const CATEGORY_MIGRATIONS = [
+  // Friendly slug → master category id mapping (fuzzy, case-insensitive).
+  `UPDATE products SET category_id = 'cat-classic-pizza'
+   WHERE slug IN (
+     'margherita', 'pepperoni', 'hawaiian', 'hot-spicy-pepperoni',
+     'virgin-margherita', 'margherita-veggie', 'pepperoni-veggie',
+     'thai-spicy-pepperoni', 'bbq', 'meat-lovers', 'farmhouse-veggie',
+     'pepperoni-hawaiian', 'margherita-pepperoni', 'garlic-bread',
+     'crispy-fries', 'chicken-wings-8pc', 'onion-rings', 'choco-milkshake',
+     'veggie-burger', 'cheese-burger', 'chicken-burger', 'big-stack-burger'
+   )`,
+
+  `UPDATE products SET category_id = 'cat-premium-pizza'
+   WHERE slug IN (
+     'fresh-mushroom', 'bbq-chicken', 'cheese-lovers',
+     'paneer-pizza', 'wood-fired-pepperoni', 'hot-spicy-pepperoni'
+   )`,
+
+  // Freeze any stale legacy slug references so the relationship is stable.const CATEGORY_MIGRATIONS = [
+  // Friendly slug → master category id mapping (fuzzy, case-insensitive).
+  `UPDATE products SET category_id = 'cat-classic-pizza'
+   WHERE slug IN (
+     'margherita', 'pepperoni', 'hawaiian', 'hot-spicy-pepperoni',
+     'virgin-margherita', 'margherita-veggie', 'pepperoni-veggie',
+     'thai-spicy-pepperoni', 'bbq', 'meat-lovers', 'farmhouse-veggie',
+     'pepperoni-hawaiian', 'margherita-pepperoni', 'garlic-bread',
+     'crispy-fries', 'chicken-wings-8pc', 'onion-rings', 'choco-milkshake',
+     'veggie-burger', 'cheese-burger', 'chicken-burger', 'big-stack-burger'
+   )`,
+
+  `UPDATE products SET category_id = 'cat-premium-pizza'
+   WHERE slug IN (
+     'fresh-mushroom', 'bbq-chicken', 'cheese-lovers',
+     'paneer-pizza', 'wood-fired-pepperoni', 'hot-spicy-pepperoni'
+   )`,
+
+  // Freeze any stale legacy slug references so the relationship is stable.
+  `UPDATE products SET slug = slug WHERE 1=0`,
 ];

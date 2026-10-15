@@ -9,6 +9,7 @@ import { cart } from './routes/cart.js';
 import { orders } from './routes/orders.js';
 import { admin } from './routes/admin.js';
 import { rider as riderRoutes } from './routes/rider.js';
+import { categories } from './routes/categories.js';
 
 /**
  * Builds the API-only Hono application. Static asset serving differs per
@@ -45,7 +46,8 @@ export function createApi() {
   app.route('/api/orders', orders);
   app.route('/api/admin', admin);
   app.route('/api/rider', riderRoutes);
-  app.route('/api', catalog);
+  app.route('/api/catalog', catalog);
+  app.route('/api/categories', categories);
 
   app.notFound((c) => {
     if (c.req.path.startsWith('/api/')) {
